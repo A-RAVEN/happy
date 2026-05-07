@@ -715,7 +715,9 @@ export const ru: TranslationStructure = {
         failedToConnectTerminal: 'Не удалось подключить терминал',
         cameraPermissionsRequiredToConnectTerminal: 'Для подключения терминала требуется доступ к камере',
         failedToLinkDevice: 'Не удалось связать устройство',
-        cameraPermissionsRequiredToScanQr: 'Для сканирования QR-кодов требуется доступ к камере'
+        cameraPermissionsRequiredToScanQr: 'Для сканирования QR-кодов требуется доступ к камере',
+        barcodeScannerNotAvailable: 'Сканер штрих-кодов недоступен на этом устройстве',
+        failedToOpenScanner: 'Не удалось открыть сканер'
     },
 
     navigation: {

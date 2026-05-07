@@ -711,7 +711,9 @@ export const ca: TranslationStructure = {
         failedToConnectTerminal: 'Ha fallat connectar el terminal',
         cameraPermissionsRequiredToConnectTerminal: 'Es requereixen permisos de càmera per connectar el terminal',
         failedToLinkDevice: 'Ha fallat enllaçar el dispositiu',
-        cameraPermissionsRequiredToScanQr: 'Es requereixen permisos de càmera per escanejar codis QR'
+        cameraPermissionsRequiredToScanQr: 'Es requereixen permisos de càmera per escanejar codis QR',
+        barcodeScannerNotAvailable: "L'escàner de codis de barres no està disponible en aquest dispositiu",
+        failedToOpenScanner: "No s'ha pogut obrir l'escàner"
     },
 
     navigation: {

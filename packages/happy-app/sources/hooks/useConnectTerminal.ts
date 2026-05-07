@@ -55,11 +55,19 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
     }, [auth.credentials, options]);
 
     const connectTerminal = React.useCallback(async () => {
+        if (!CameraView.isModernBarcodeScannerAvailable) {
+            Modal.alert(t('common.error'), t('modals.barcodeScannerNotAvailable'), [{ text: t('common.ok') }]);
+            return;
+        }
         if (await checkScannerPermissions()) {
-            // Use camera scanner
-            CameraView.launchScanner({
-                barcodeTypes: ['qr']
-            });
+            try {
+                await CameraView.launchScanner({
+                    barcodeTypes: ['qr']
+                });
+            } catch (e) {
+                console.error('Failed to launch scanner', e);
+                Modal.alert(t('common.error'), t('modals.failedToOpenScanner'), [{ text: t('common.ok') }]);
+            }
         } else {
             Modal.alert(t('common.error'), t('modals.cameraPermissionsRequiredToConnectTerminal'), [{ text: t('common.ok') }]);
         }

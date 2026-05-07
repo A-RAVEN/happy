@@ -711,7 +711,9 @@ export const es: TranslationStructure = {
         failedToConnectTerminal: 'Falló al conectar terminal',
         cameraPermissionsRequiredToConnectTerminal: 'Se requieren permisos de cámara para conectar terminal',
         failedToLinkDevice: 'Falló al vincular dispositivo',
-        cameraPermissionsRequiredToScanQr: 'Se requieren permisos de cámara para escanear códigos QR'
+        cameraPermissionsRequiredToScanQr: 'Se requieren permisos de cámara para escanear códigos QR',
+        barcodeScannerNotAvailable: 'El escáner de códigos de barras no está disponible en este dispositivo',
+        failedToOpenScanner: 'No se pudo abrir el escáner'
     },
 
     navigation: {

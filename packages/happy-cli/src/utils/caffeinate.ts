@@ -1,6 +1,7 @@
 /**
- * Caffeinate utility for preventing macOS from sleeping
- * Uses the built-in macOS caffeinate command to keep the system awake
+ * Caffeinate utility for preventing system sleep
+ * - macOS: spawns `caffeinate -im` process
+ * - Windows: uses `powercfg` to set standby timeout to Never
  */
 
 import { spawn, execSync, ChildProcess } from 'child_process'
@@ -8,6 +9,48 @@ import { logger } from '@/ui/logger'
 import { configuration } from '@/configuration'
 
 let caffeinateProcess: ChildProcess | null = null
+
+// Windows: saved original standby timeout values (in seconds) for restoration
+let savedAcTimeout: number | null = null
+let savedDcTimeout: number | null = null
+
+/**
+ * Query the current standby timeout values on Windows
+ * Runs `powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE` and parses hex values
+ */
+function queryCurrentStandbyTimeout(): { ac: number; dc: number } {
+    const output = execSync(
+        'powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE',
+        { timeout: 5000, encoding: 'utf8' }
+    )
+
+    // Match all hex values in output (encoding-robust: hex digits are ASCII-safe)
+    const hexMatches = output.match(/0x([0-9a-fA-F]{8})/g)
+    if (!hexMatches || hexMatches.length < 2) {
+        logger.debug('[caffeinate] Windows: failed to parse powercfg output, using defaults')
+        return { ac: 1800, dc: 1800 }
+    }
+
+    // Last two hex values are AC and DC power setting indices
+    const ac = parseInt(hexMatches[hexMatches.length - 2], 16)
+    const dc = parseInt(hexMatches[hexMatches.length - 1], 16)
+
+    return { ac, dc }
+}
+
+/**
+ * Set standby timeout values on Windows
+ * @param acSeconds - AC timeout in seconds (0 = Never)
+ * @param dcSeconds - DC timeout in seconds (0 = Never)
+ */
+function setStandbyTimeout(acSeconds: number, dcSeconds: number): void {
+    // powercfg /change takes minutes; round up to nearest minute (0 stays 0 = Never)
+    const acMinutes = acSeconds === 0 ? 0 : Math.max(1, Math.round(acSeconds / 60))
+    const dcMinutes = dcSeconds === 0 ? 0 : Math.max(1, Math.round(dcSeconds / 60))
+
+    execSync(`powercfg /change standby-timeout-ac ${acMinutes}`, { timeout: 5000, stdio: 'ignore' })
+    execSync(`powercfg /change standby-timeout-dc ${dcMinutes}`, { timeout: 5000, stdio: 'ignore' })
+}
 
 /**
  * Start caffeinate to prevent system sleep
@@ -20,6 +63,25 @@ export function startCaffeinate(): boolean {
     if (configuration.disableCaffeinate) {
         logger.debug('[caffeinate] Caffeinate disabled via HAPPY_DISABLE_CAFFEINATE environment variable')
         return false
+    }
+
+    // Windows: use powercfg to set standby timeout to Never
+    if (process.platform === 'win32') {
+        try {
+            const { ac, dc } = queryCurrentStandbyTimeout()
+            savedAcTimeout = ac
+            savedDcTimeout = dc
+            logger.debug(`[caffeinate] Windows: saved standby timeouts AC=${ac}s DC=${dc}s`)
+
+            setStandbyTimeout(0, 0)
+            logger.debug('[caffeinate] Windows: standby timeout set to Never')
+
+            setupCleanupHandlers()
+            return true
+        } catch (error) {
+            logger.warn('[caffeinate] Windows: failed to configure power settings, continuing without sleep prevention:', error)
+            return false
+        }
     }
 
     // Only run on macOS
@@ -76,7 +138,27 @@ export async function stopCaffeinate(): Promise<void> {
         logger.debug('[caffeinate] Already stopping, skipping')
         return
     }
-    
+
+    // Windows: restore original power settings
+    if (process.platform === 'win32') {
+        if (savedAcTimeout === null || savedDcTimeout === null) {
+            logger.debug('[caffeinate] Windows: no saved timeouts to restore')
+            return
+        }
+        isStopping = true
+        try {
+            logger.debug(`[caffeinate] Windows: restoring standby timeouts AC=${savedAcTimeout}s DC=${savedDcTimeout}s`)
+            setStandbyTimeout(savedAcTimeout, savedDcTimeout)
+            savedAcTimeout = null
+            savedDcTimeout = null
+            isStopping = false
+        } catch (error) {
+            logger.debug('[caffeinate] Windows: failed to restore power settings:', error)
+            isStopping = false
+        }
+        return
+    }
+
     if (caffeinateProcess && !caffeinateProcess.killed) {
         isStopping = true
         logger.debug(`[caffeinate] Stopping caffeinate process PID ${caffeinateProcess.pid}`)
@@ -104,6 +186,9 @@ export async function stopCaffeinate(): Promise<void> {
  * Check if caffeinate is currently running
  */
 export function isCaffeinateRunning(): boolean {
+    if (process.platform === 'win32') {
+        return savedAcTimeout !== null
+    }
     return caffeinateProcess !== null && !caffeinateProcess.killed
 }
 
