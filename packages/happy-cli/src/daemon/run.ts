@@ -127,18 +127,27 @@ export async function startDaemon(): Promise<void> {
     process.exit(0);
   }
 
-  // Acquire exclusive lock (proves daemon is running)
-  const daemonLockHandle = await acquireDaemonLock(5, 200);
-  if (!daemonLockHandle) {
-    logger.debug('[DAEMON RUN] Daemon lock file already held, another daemon is running');
-    process.exit(0);
-  }
-
-  // At this point we should be safe to startup the daemon:
-  // 1. Not have a stale daemon state
-  // 2. Should not have another daemon process running
+  let daemonLockHandle: Awaited<ReturnType<typeof acquireDaemonLock>> = null;
 
   try {
+    // Acquire exclusive lock (proves daemon is running)
+    daemonLockHandle = await acquireDaemonLock(5, 200);
+    if (!daemonLockHandle) {
+      logger.debug('[DAEMON RUN] Daemon lock file already held, another daemon is running');
+      process.exit(0);
+    }
+
+    // Write daemon.state.json early with status "starting" for diagnosability
+    writeDaemonState({
+      pid: process.pid,
+      httpPort: 0,
+      startTime: new Date().toLocaleString(),
+      startedWithCliVersion: packageJson.version,
+      status: 'starting',
+      statusSince: Date.now(),
+    });
+    logger.debug('[DAEMON RUN] Early daemon state written (status: starting)');
+
     // Start caffeinate
     const caffeinateStarted = startCaffeinate();
     if (caffeinateStarted) {
@@ -743,13 +752,15 @@ export async function startDaemon(): Promise<void> {
       onHappySessionWebhook
     });
 
-    // Write initial daemon state (no lock needed for state file)
+    // Write initial daemon state with httpPort (no lock needed for state file)
     const fileState: DaemonLocallyPersistedState = {
       pid: process.pid,
       httpPort: controlPort,
       startTime: new Date().toLocaleString(),
       startedWithCliVersion: packageJson.version,
-      daemonLogPath: logger.logFilePath
+      daemonLogPath: logger.logFilePath,
+      status: 'starting',
+      statusSince: Date.now(),
     };
     writeDaemonState(fileState);
     logger.debug('[DAEMON RUN] Daemon state written');
@@ -858,8 +869,9 @@ export async function startDaemon(): Promise<void> {
         // leaving nothing running once we also exit.
         apiMachine.shutdown();
         await stopControlServer();
+        // Release lock BEFORE clearing state to fix Windows handle issue
+        await releaseDaemonLock(daemonLockHandle!);
         await cleanupDaemonState();
-        await releaseDaemonLock(daemonLockHandle);
         await stopCaffeinate();
 
         try {
@@ -884,13 +896,17 @@ export async function startDaemon(): Promise<void> {
 
       // Heartbeat
       try {
+        const previousState = await readDaemonState();
         const updatedState: DaemonLocallyPersistedState = {
           pid: process.pid,
           httpPort: controlPort,
           startTime: fileState.startTime,
           startedWithCliVersion: packageJson.version,
           lastHeartbeat: new Date().toLocaleString(),
-          daemonLogPath: fileState.daemonLogPath
+          daemonLogPath: fileState.daemonLogPath,
+          status: previousState?.status ?? fileState.status,
+          statusSince: previousState?.statusSince ?? fileState.statusSince,
+          statusReason: previousState?.statusReason ?? fileState.statusReason,
         };
         writeDaemonState(updatedState);
         if (process.env.DEBUG) {
@@ -913,6 +929,21 @@ export async function startDaemon(): Promise<void> {
         logger.debug('[DAEMON RUN] Health check interval cleared');
       }
 
+      // Write local daemon state as "shutting-down"
+      try {
+        writeDaemonState({
+          pid: process.pid,
+          httpPort: controlPort,
+          startTime: fileState.startTime,
+          startedWithCliVersion: packageJson.version,
+          daemonLogPath: fileState.daemonLogPath,
+          status: 'shutting-down',
+          statusSince: Date.now(),
+        });
+      } catch {
+        // Best effort
+      }
+
       // Update daemon state before shutting down
       await apiMachine.updateDaemonState((state: DaemonState | null) => ({
         ...state,
@@ -926,13 +957,25 @@ export async function startDaemon(): Promise<void> {
 
       apiMachine.shutdown();
       await stopControlServer();
+      // Release lock BEFORE clearing state to fix Windows handle issue
+      await releaseDaemonLock(daemonLockHandle!);
       await cleanupDaemonState();
       await stopCaffeinate();
-      await releaseDaemonLock(daemonLockHandle);
 
       logger.debug('[DAEMON RUN] Cleanup completed, exiting process');
       process.exit(0);
     };
+
+    // Update daemon state to "running" now that all startup steps succeeded
+    writeDaemonState({
+      pid: process.pid,
+      httpPort: controlPort,
+      startTime: fileState.startTime,
+      startedWithCliVersion: packageJson.version,
+      daemonLogPath: fileState.daemonLogPath,
+      status: 'running',
+      statusSince: Date.now(),
+    });
 
     logger.debug('[DAEMON RUN] Daemon started successfully, waiting for shutdown request');
 
@@ -940,7 +983,43 @@ export async function startDaemon(): Promise<void> {
     const shutdownRequest = await resolvesWhenShutdownRequested;
     await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isCredentialError = errorMessage.includes('Authentication failed') || errorMessage.includes('No credentials');
+
     logger.debug('[DAEMON RUN][FATAL] Failed somewhere unexpectedly - exiting with code 1', error);
+
+    // Write error state to daemon.state.json
+    try {
+      const statusReason = isCredentialError
+        ? `No credentials — run 'happy auth login' to re-authenticate`
+        : `Daemon startup failed: ${errorMessage}`;
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: 0,
+        startTime: new Date().toLocaleString(),
+        startedWithCliVersion: packageJson.version,
+        status: 'error',
+        statusSince: Date.now(),
+        statusReason,
+      });
+    } catch {
+      // Best effort — state write may fail if disk is full
+    }
+
+    // Release lock and clean up state files
+    if (daemonLockHandle) {
+      await releaseDaemonLock(daemonLockHandle!);
+    }
+    await cleanupDaemonState();
+    await stopCaffeinate();
+
+    // Guide user to re-authenticate if credentials are missing
+    if (isCredentialError) {
+      if (process.stdout.isTTY) {
+        console.log('No credentials found. Run `happy auth login` to re-authenticate.');
+      }
+    }
+
     process.exit(1);
   }
 }

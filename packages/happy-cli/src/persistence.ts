@@ -6,7 +6,7 @@
 
 import { FileHandle } from 'node:fs/promises'
 import { readFile, writeFile, mkdir, open, unlink, rename, stat } from 'node:fs/promises'
-import { existsSync, writeFileSync, readFileSync, unlinkSync, renameSync } from 'node:fs'
+import { existsSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from 'node:fs'
 import { constants } from 'node:fs'
 import { configuration } from '@/configuration'
 import * as z from 'zod';
@@ -75,6 +75,9 @@ export interface DaemonLocallyPersistedState {
   startedWithCliVersion: string;
   lastHeartbeat?: string;
   daemonLogPath?: string;
+  status?: 'starting' | 'running' | 'shutting-down' | 'error';
+  statusSince?: number;
+  statusReason?: string;
 }
 
 export async function readSettings(): Promise<Settings> {
@@ -251,7 +254,28 @@ export async function readCredentials(): Promise<Credentials | null> {
         }
       }
     }
-  } catch {
+  } catch (error: any) {
+    // Collect diagnostic data to distinguish root causes
+    const fileExists = existsSync(configuration.privateKeyFile);
+    let fileSize = -1;
+    let fileMode = -1;
+    if (fileExists) {
+      try {
+        const stats = statSync(configuration.privateKeyFile);
+        fileSize = stats.size;
+        fileMode = stats.mode;
+      } catch {
+        // File disappeared or permissions changed
+      }
+    }
+    const errorCode = error?.code || 'UNKNOWN';
+    const errorMessage = error?.message || String(error);
+
+    logger.warn(
+      `[PERSISTENCE] Failed to read credentials: ` +
+      `fileExists=${fileExists}, fileSize=${fileSize}, fileMode=${fileMode}, ` +
+      `errorCode=${errorCode}, errorMessage=${errorMessage}`
+    );
     return null
   }
   return null
@@ -265,6 +289,21 @@ export async function writeCredentialsLegacy(credentials: { secret: Uint8Array, 
     secret: encodeBase64(credentials.secret),
     token: credentials.token
   }, null, 2));
+
+  // Read-back verification
+  try {
+    const content = readFileSync(configuration.privateKeyFile, 'utf-8');
+    const parsed = JSON.parse(content);
+    if (!parsed.token || !parsed.secret) {
+      logger.warn(`[PERSISTENCE] Credential write verification failed: written access.key missing required fields (token=${!!parsed.token}, secret=${!!parsed.secret})`);
+    } else {
+      logger.debug('[PERSISTENCE] Credential write verified successfully (legacy)');
+    }
+  } catch (error) {
+    const fileExists = existsSync(configuration.privateKeyFile);
+    const fileSize = fileExists ? (() => { try { return statSync(configuration.privateKeyFile).size; } catch { return -1; } })() : -1;
+    logger.warn(`[PERSISTENCE] Credential write verification failed: fileExists=${fileExists}, fileSize=${fileSize}, error=${error instanceof Error ? error.message : error}`);
+  }
 }
 
 export async function writeCredentialsDataKey(credentials: { publicKey: Uint8Array, machineKey: Uint8Array, token: string }): Promise<void> {
@@ -275,6 +314,21 @@ export async function writeCredentialsDataKey(credentials: { publicKey: Uint8Arr
     encryption: { publicKey: encodeBase64(credentials.publicKey), machineKey: encodeBase64(credentials.machineKey) },
     token: credentials.token
   }, null, 2));
+
+  // Read-back verification
+  try {
+    const content = readFileSync(configuration.privateKeyFile, 'utf-8');
+    const parsed = JSON.parse(content);
+    if (!parsed.token || !parsed.encryption) {
+      logger.warn(`[PERSISTENCE] Credential write verification failed: written access.key missing required fields (token=${!!parsed.token}, encryption=${!!parsed.encryption})`);
+    } else {
+      logger.debug('[PERSISTENCE] Credential write verified successfully (dataKey)');
+    }
+  } catch (error) {
+    const fileExists = existsSync(configuration.privateKeyFile);
+    const fileSize = fileExists ? (() => { try { return statSync(configuration.privateKeyFile).size; } catch { return -1; } })() : -1;
+    logger.warn(`[PERSISTENCE] Credential write verification failed: fileExists=${fileExists}, fileSize=${fileSize}, error=${error instanceof Error ? error.message : error}`);
+  }
 }
 
 export async function clearCredentials(): Promise<void> {
@@ -325,8 +379,8 @@ export async function clearDaemonState(): Promise<void> {
   if (existsSync(configuration.daemonLockFile)) {
     try {
       await unlink(configuration.daemonLockFile);
-    } catch {
-      // Lock file might be held by running daemon, ignore error
+    } catch (error) {
+      logger.debug(`[PERSISTENCE] Failed to delete daemon lock file during cleanup: ${error instanceof Error ? error.message : error}`);
     }
   }
 }

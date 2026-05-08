@@ -189,14 +189,31 @@ export class ApiSessionClient extends EventEmitter {
                 if (data.body.t === 'new-message') {
                     const messageSeq = data.body.message?.seq;
                     if (this.lastSeq === 0) {
+                        logger.debug(
+                            `[SOCKET] [UPDATE] Skipping new-message: lastSeq=0 (initial sync not complete), ` +
+                            `messageSeq=${messageSeq}`
+                        );
                         this.receiveSync.invalidate();
                         return;
                     }
                     if (typeof messageSeq !== 'number' || messageSeq !== this.lastSeq + 1 || data.body.message.content.t !== 'encrypted') {
+                        logger.debug(
+                            `[SOCKET] [UPDATE] Skipping new-message: seq mismatch — ` +
+                            `expected=${this.lastSeq + 1}, received=${messageSeq} (type=${typeof messageSeq}), ` +
+                            `contentType=${data.body.message.content.t}`
+                        );
                         this.receiveSync.invalidate();
                         return;
                     }
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
+                    if (body === null) {
+                      logger.warn(
+                        `[SOCKET] [UPDATE] Failed to decrypt incoming message: ` +
+                        `sessionId=${this.sessionId}, messageSeq=${messageSeq}, encryptionVariant=${this.encryptionVariant}`
+                      );
+                      this.receiveSync.invalidate();
+                      return;
+                    }
                     logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
                     this.routeIncomingMessage(body);
                     this.lastSeq = messageSeq;
