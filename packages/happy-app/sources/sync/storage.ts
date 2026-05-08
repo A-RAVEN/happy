@@ -325,6 +325,17 @@ export const storage = create<StorageState>()((set, get) => {
     let profile = loadProfile();
     let sessionDrafts = loadSessionDrafts();
     let sessionPermissionModes = loadSessionPermissionModes();
+    // Migrate legacy "dontAsk" to "bypassPermissions"
+    let permissionModesChanged = false;
+    for (const key of Object.keys(sessionPermissionModes)) {
+        if (sessionPermissionModes[key] === 'dontAsk') {
+            sessionPermissionModes[key] = 'bypassPermissions';
+            permissionModesChanged = true;
+        }
+    }
+    if (permissionModesChanged) {
+        saveSessionPermissionModes(sessionPermissionModes);
+    }
     let sessionModelModes = loadSessionModelModes();
     let sessionEffortLevels = loadSessionEffortLevels();
     return {
